@@ -564,6 +564,86 @@ async def admin_broadcast_input(update: Update, context: ContextTypes.DEFAULT_TY
     await admin_command(update, context)
     return ConversationHandler.END
 
+async def admin_set_global_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    await query.message.reply_text(
+        "💰 **Set Global Search Price**\n\n"
+        "Please enter new price:\n\n"
+        "Example: `10`",
+        parse_mode='Markdown'
+    )
+
+    return SET_GLOBAL_PRICE
+
+async def admin_set_global_price_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        global SEARCH_COST
+        new_price = float(update.message.text.strip())
+        SEARCH_COST = new_price
+
+        await update.message.reply_text(f"✅ Global search price set to ₹{new_price}")
+        await admin_command(update, context)
+
+    except ValueError:
+        await update.message.reply_text("❌ Please enter a valid number.")
+        return SET_GLOBAL_PRICE
+
+    return ConversationHandler.END
+
+async def admin_set_user_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    await query.message.reply_text(
+        "👤 **Set User Search Price**\n\n"
+        "Please enter user ID and price:\n\n"
+        "`user_id price`\n\n"
+        "Example:\n"
+        "`123456789 5`",
+        parse_mode='Markdown'
+    )
+
+    return SET_USER_PRICE
+
+async def admin_set_user_price_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_input = update.message.text.strip().split()
+
+    if len(user_input) != 2:
+        await update.message.reply_text(
+            "❌ Invalid format. Please use:\n\n"
+            "`user_id price`\n\n"
+            "Example:\n"
+            "`123456789 5`",
+            parse_mode='Markdown'
+        )
+        return SET_USER_PRICE
+
+    try:
+        user_id = int(user_input[0])
+        price = float(user_input[1])
+
+        if user_id not in user_settings:
+            user_settings[user_id] = {}
+
+        user_settings[user_id]['search_price'] = price
+
+        await update.message.reply_text(
+            f"✅ Search price for user {user_id} set to ₹{price}"
+        )
+
+        # Show admin panel again
+        await admin_command(update, context)
+
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid input. User ID must be a number and price must be a valid number."
+        )
+        return SET_USER_PRICE
+
+    return ConversationHandler.END
+
 # ============= USER COMMANDS =============
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -720,7 +800,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text('Operation cancelled.')
     return ConversationHandler.END
 
-# ============= MESSAGE HANDLER - Your Original Logic =============
+# ============= MESSAGE HANDLER =============
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check if message is part of a conversation
     if context.user_data.get('state') in [AMOUNT, BROADCAST_MESSAGE, ADMIN_ADD_FUNDS, SET_GLOBAL_PRICE, SET_USER_PRICE, REMOVE_PREMIUM, MAKE_PREMIUM]:
@@ -926,9 +1006,9 @@ def run_health_server():
     server = HTTPServer(('0.0.0.0', PORT), HealthCheckHandler)
     server.serve_forever()
 
-# ============= MAIN FUNCTION FOR RENDER =============
-def main():
-    """Start the bot for Render deployment"""
+# ============= MAIN FUNCTION - FIXED FOR RENDER =============
+async def main():
+    """Fixed main function for Render deployment"""
     logger.info("🚀 Starting Telegram Bot on Render...")
     logger.info(f"🌐 Port: {PORT}")
     logger.info(f"🤖 Bot Token: {BOT_TOKEN[:10]}..." if BOT_TOKEN else "❌ No token")
@@ -939,7 +1019,7 @@ def main():
     health_thread.start()
     logger.info(f"💚 Health check server started on port {PORT}")
     
-    # Create the Application
+    # Create the Application - FIXED VERSION
     application = Application.builder().token(BOT_TOKEN).build()
 
     # Add command handlers
@@ -995,15 +1075,34 @@ def main():
     )
     application.add_handler(admin_broadcast_handler)
 
+    admin_set_global_price_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_set_global_price, pattern='^admin_set_global_price$')],
+        states={
+            SET_GLOBAL_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_set_global_price_input)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
+    application.add_handler(admin_set_global_price_handler)
+
+    admin_set_user_price_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_set_user_price, pattern='^admin_set_user_price$')],
+        states={
+            SET_USER_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_set_user_price_input)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
+    application.add_handler(admin_set_user_price_handler)
+
     # Add callback query handler
     application.add_handler(CallbackQueryHandler(button_handler))
     
     # Add message handler for mobile search
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Start the bot with polling (better for Render free tier)
+    # Start the bot with polling - FIXED VERSION
     logger.info("🎯 Bot is running with polling...")
-    application.run_polling(drop_pending_updates=True)
+    await application.run_polling(drop_pending_updates=True)
 
+# ============= ENTRY POINT - FIXED =============
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())
