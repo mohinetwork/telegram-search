@@ -38,13 +38,15 @@ logger = logging.getLogger(__name__)
 # Global storage
 user_wallets = {}
 premium_users = set()
+middlemen = set()
 user_search_count = {}
 user_settings = {}
 pending_payments = {}
 
 # Conversation states
-(AMOUNT, BROADCAST_MESSAGE, ADMIN_ADD_FUNDS, SET_GLOBAL_PRICE, 
- SET_USER_PRICE, REMOVE_PREMIUM, MAKE_PREMIUM) = range(7)
+(AMOUNT, BROADCAST_MESSAGE, ADMIN_ADD_FUNDS, SET_GLOBAL_PRICE,
+ SET_USER_PRICE, REMOVE_PREMIUM, MAKE_PREMIUM,
+ ADD_MIDDLEMAN, REMOVE_MIDDLEMAN, MIDDLEMAN_TRANSFER) = range(10)
 
 # ============= SEARCH FUNCTION =============
 async def search_mobile(mobile):
@@ -331,6 +333,9 @@ async def schedule_payment_check(context, order_id, chat_id, message_id):
 def is_admin(user_id):
     return user_id in ADMIN_IDS
 
+def is_middleman(user_id):
+    return user_id in middlemen
+
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
@@ -345,6 +350,9 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📊 Statistics", callback_data='admin_stats')],
         [InlineKeyboardButton("💰 Set Global Search Price", callback_data='admin_set_global_price')],
         [InlineKeyboardButton("👤 Set User Search Price", callback_data='admin_set_user_price')],
+        [InlineKeyboardButton("🤝 Add Middleman", callback_data='admin_add_middleman')],
+        [InlineKeyboardButton("❌ Remove Middleman", callback_data='admin_remove_middleman')],
+        [InlineKeyboardButton("📋 List Middlemen", callback_data='admin_list_middlemen')],
         [InlineKeyboardButton("📢 Broadcast Message", callback_data='admin_broadcast')],
         [InlineKeyboardButton("🔙 Back to Main", callback_data='main_menu')]
     ]
@@ -644,6 +652,218 @@ async def admin_set_user_price_input(update: Update, context: ContextTypes.DEFAU
 
     return ConversationHandler.END
 
+# ============= MIDDLEMAN ADMIN FUNCTIONS =============
+async def admin_add_middleman(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    await query.message.reply_text(
+        "🤝 **Add Middleman**\n\n"
+        "Please enter the user ID to make a middleman:\n\n"
+        "Example: `123456789`",
+        parse_mode='Markdown'
+    )
+
+    return ADD_MIDDLEMAN
+
+async def admin_add_middleman_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id = int(update.message.text.strip())
+        middlemen.add(user_id)
+
+        if user_id not in user_wallets:
+            user_wallets[user_id] = 0
+
+        await update.message.reply_text(
+            f"✅ User {user_id} is now a **Middleman**!\n"
+            f"They can transfer funds from their wallet to other users.",
+            parse_mode='Markdown'
+        )
+
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="🤝 **Congratulations!**\n\n"
+                     "You have been assigned the **Middleman** role!\n"
+                     "You can now transfer funds to other users.\n\n"
+                     "Use /middleman to access your panel.",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Could not notify middleman {user_id}: {e}")
+
+        await admin_command(update, context)
+
+    except ValueError:
+        await update.message.reply_text("❌ Please enter a valid user ID (number).")
+        return ADD_MIDDLEMAN
+
+    return ConversationHandler.END
+
+async def admin_remove_middleman(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    await query.message.reply_text(
+        "❌ **Remove Middleman**\n\n"
+        "Please enter the user ID to remove as middleman:\n\n"
+        "Example: `123456789`",
+        parse_mode='Markdown'
+    )
+
+    return REMOVE_MIDDLEMAN
+
+async def admin_remove_middleman_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id = int(update.message.text.strip())
+
+        if user_id in middlemen:
+            middlemen.remove(user_id)
+            await update.message.reply_text(f"✅ Middleman status removed for user {user_id}.")
+        else:
+            await update.message.reply_text(f"ℹ️ User {user_id} was not a middleman.")
+
+        await admin_command(update, context)
+
+    except ValueError:
+        await update.message.reply_text("❌ Please enter a valid user ID (number).")
+        return REMOVE_MIDDLEMAN
+
+    return ConversationHandler.END
+
+async def admin_list_middlemen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if not middlemen:
+        text = "📋 **Middlemen List**\n\nNo middlemen registered yet."
+    else:
+        lines = ["📋 **Middlemen List**\n"]
+        for mid_id in middlemen:
+            balance = user_wallets.get(mid_id, 0)
+            lines.append(f"• `{mid_id}` — Balance: ₹{balance}")
+        text = "\n".join(lines)
+
+    keyboard = [[InlineKeyboardButton("🔙 Back to Admin", callback_data='admin_panel')]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+
+# ============= MIDDLEMAN PANEL =============
+async def middleman_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    if not is_middleman(user_id) and not is_admin(user_id):
+        await update.effective_message.reply_text("❌ You are not authorized to access this panel.")
+        return
+
+    balance = user_wallets.get(user_id, 0)
+
+    keyboard = [
+        [InlineKeyboardButton("💸 Transfer Funds to User", callback_data='middleman_transfer')],
+        [InlineKeyboardButton("💳 My Balance", callback_data='wallet')],
+        [InlineKeyboardButton("🔙 Back to Main", callback_data='main_menu')]
+    ]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.effective_message.reply_text(
+        f"🤝 **Middleman Panel**\n\n"
+        f"💳 Your Balance: ₹{balance}\n\n"
+        f"You can transfer funds from your wallet to any user.",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+async def middleman_transfer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    if not is_middleman(user_id) and not is_admin(user_id):
+        await query.answer("❌ Access denied.", show_alert=True)
+        return ConversationHandler.END
+
+    await query.answer()
+
+    await query.message.reply_text(
+        "💸 **Transfer Funds to User**\n\n"
+        "Please enter target user ID and amount:\n\n"
+        "`user_id amount`\n\n"
+        "Example:\n"
+        "`123456789 50`",
+        parse_mode='Markdown'
+    )
+
+    return MIDDLEMAN_TRANSFER
+
+async def middleman_transfer_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sender_id = update.effective_user.id
+    user_input = update.message.text.strip().split()
+
+    if len(user_input) != 2:
+        await update.message.reply_text(
+            "❌ Invalid format. Please use:\n\n"
+            "`user_id amount`\n\n"
+            "Example:\n"
+            "`123456789 50`",
+            parse_mode='Markdown'
+        )
+        return MIDDLEMAN_TRANSFER
+
+    try:
+        target_user_id = int(user_input[0])
+        amount = float(user_input[1])
+
+        if amount <= 0:
+            await update.message.reply_text("❌ Amount must be greater than 0.")
+            return MIDDLEMAN_TRANSFER
+
+        sender_balance = user_wallets.get(sender_id, 0)
+
+        if sender_balance < amount:
+            await update.message.reply_text(
+                f"❌ **Insufficient Balance**\n\n"
+                f"Your balance: ₹{sender_balance}\n"
+                f"Required: ₹{amount}",
+                parse_mode='Markdown'
+            )
+            return MIDDLEMAN_TRANSFER
+
+        # Deduct from middleman's wallet
+        user_wallets[sender_id] = sender_balance - amount
+
+        # Credit target user
+        if target_user_id not in user_wallets:
+            user_wallets[target_user_id] = 0
+        user_wallets[target_user_id] += amount
+
+        await update.message.reply_text(
+            f"✅ **Transfer Successful!**\n\n"
+            f"Transferred ₹{amount} to user `{target_user_id}`.\n"
+            f"Your new balance: ₹{user_wallets[sender_id]}",
+            parse_mode='Markdown'
+        )
+
+        # Notify recipient
+        try:
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=f"💸 **Funds Received!**\n\n"
+                     f"₹{amount} has been added to your wallet.\n"
+                     f"New balance: ₹{user_wallets[target_user_id]}",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Could not notify user {target_user_id}: {e}")
+
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid input. User ID must be a number and amount must be a valid number."
+        )
+        return MIDDLEMAN_TRANSFER
+
+    return ConversationHandler.END
+
 # ============= USER COMMANDS =============
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -661,6 +881,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if is_admin(user_id):
         keyboard.append([InlineKeyboardButton("👨‍💼 Admin Panel", callback_data='admin_panel')])
+
+    if is_middleman(user_id) and not is_admin(user_id):
+        keyboard.append([InlineKeyboardButton("🤝 Middleman Panel", callback_data='middleman_panel')])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -954,6 +1177,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_admin(user_id):
             keyboard.append([InlineKeyboardButton("👨‍💼 Admin Panel", callback_data='admin_panel')])
 
+        if is_middleman(user_id) and not is_admin(user_id):
+            keyboard.append([InlineKeyboardButton("🤝 Middleman Panel", callback_data='middleman_panel')])
+
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.message.reply_text(
@@ -974,7 +1200,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• /start - Start the bot\n"
             f"• /wallet - Check wallet balance\n"
             f"• /balance - Quick balance check\n"
-            f"• /admin - Admin panel (admins only)\n\n"
+            f"• /admin - Admin panel (admins only)\n"
+            f"• /middleman - Middleman panel (middlemen only)\n\n"
             f"**Search Cost:** ₹{SEARCH_COST} per search"
         )
 
@@ -985,6 +1212,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == 'admin_panel':
         await admin_command(query, context)
+
+    elif query.data == 'middleman_panel':
+        await middleman_command(query, context)
 
 # ============= RENDER HEALTH CHECK ENDPOINT =============
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -1092,6 +1322,41 @@ async def main():
         fallbacks=[CommandHandler('cancel', cancel)],
     )
     application.add_handler(admin_set_user_price_handler)
+
+    # Middleman admin conversation handlers
+    admin_add_middleman_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_add_middleman, pattern='^admin_add_middleman$')],
+        states={
+            ADD_MIDDLEMAN: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_middleman_input)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
+    application.add_handler(admin_add_middleman_handler)
+
+    admin_remove_middleman_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_remove_middleman, pattern='^admin_remove_middleman$')],
+        states={
+            REMOVE_MIDDLEMAN: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_remove_middleman_input)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
+    application.add_handler(admin_remove_middleman_handler)
+
+    # Middleman transfer conversation handler
+    middleman_transfer_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(middleman_transfer_callback, pattern='^middleman_transfer$')],
+        states={
+            MIDDLEMAN_TRANSFER: [MessageHandler(filters.TEXT & ~filters.COMMAND, middleman_transfer_input)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
+    application.add_handler(middleman_transfer_handler)
+
+    # Add middleman command handler
+    application.add_handler(CommandHandler("middleman", middleman_command))
+
+    # Admin list middlemen callback (no conversation needed)
+    application.add_handler(CallbackQueryHandler(admin_list_middlemen, pattern='^admin_list_middlemen$'))
 
     # Add callback query handler
     application.add_handler(CallbackQueryHandler(button_handler))
